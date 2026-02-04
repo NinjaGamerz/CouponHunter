@@ -1,73 +1,79 @@
 import requests
 from bs4 import BeautifulSoup
-import re
 import os
+import re
 
-# --- CONFIGURATION ---
+# --- SETTINGS ---
 KEYWORDS = ["hacking", "cyber", "ai", "python", "bug bounty", "nmap", "sqlmap", "linux", "security"]
-# Add your Telegram details here or use GitHub Secrets (Recommended)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def send_telegram(message):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+def send_to_telegram(course_title, course_link):
+    if not TOKEN or not CHAT_ID:
+        print("⚠️ Missing Telegram credentials!")
+        return
+    
+    # Clean formatting for Telegram
+    message = (
+        f"🎁 *NEW FREE COURSE FOUND!*\n\n"
+        f"🛡️ *Title:* {course_title}\n\n"
+        f"🔗 [ENROLL HERE]({course_link})"
+    )
+    
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    
+    try:
         requests.post(url, json=payload)
+        print(f"✅ Sent to Telegram: {course_title}")
+    except Exception as e:
+        print(f"❌ Telegram Error: {e}")
 
-def get_final_udemy_url(url):
-    """Follows the redirect to get the clean Udemy link"""
+def get_direct_link(url):
+    """Bypasses the 'out.php' redirection to find the actual Udemy link"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # Step 1: Get the 'out.php' page
         response = requests.get(url, headers=headers, timeout=10)
-        # Step 2: Some sites use a Meta Refresh or JS redirect. 
-        # We look for the Udemy link in the page content if we didn't get a 302 redirect.
-        if "udemy.com" in response.url:
-            return response.url
-        
-        # Search for any Udemy link in the HTML
+        # Search for a Udemy link with a coupon attached
         found = re.search(r'https?://[^\s<>"]+udemy\.com/[^\s<>"]+', response.text)
         if found:
-            return found.group(0).split('"')[0].split("'")[0]
-            
-        return url # Return original if extraction fails
+            # Clean the link from any trailing quotes or noise
+            clean_link = found.group(0).split('"')[0].split("'")[0]
+            return clean_link
+        return url
     except:
         return url
 
-def start_hunter():
-    print(f"--- 🕵️ Elite Hacking Hunter V4 ---")
+def start_scan():
+    print("🚀 Starting Ninja Hunter V5...")
     sources = [
         "https://couponscorpion.com/category/cyber-security/",
         "https://couponscorpion.com/category/development/"
     ]
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
     for site in sources:
-        print(f"\n🔍 Checking: {site}")
-        res = requests.get(site, headers=headers)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        for item in soup.find_all('h3', class_='title'):
-            title = item.get_text().strip()
-            if any(word.lower() in title.lower() for word in KEYWORDS):
-                link = item.find('a')['href']
+        try:
+            res = requests.get(site, headers={'User-Agent': 'Mozilla/5.0'})
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            for item in soup.find_all('h3', class_='title'):
+                title = item.get_text().strip()
                 
-                print(f"📌 {title}")
-                # Get the intermediate 'out.php' link
-                inner_res = requests.get(link, headers=headers)
-                inner_soup = BeautifulSoup(inner_res.text, 'html.parser')
-                btn = inner_soup.select_one("a.btn_offer_block")
-                
-                if btn:
-                    final_link = get_final_udemy_url(btn['href'])
-                    # CLEAN OUTPUT
-                    print(f"🔗 Link: {final_link}\n")
+                if any(word.lower() in title.lower() for word in KEYWORDS):
+                    # Get the intermediate link
+                    post_link = item.find('a')['href']
                     
-                    # SEND TO TELEGRAM
-                    msg = f"🎁 *New Free Course!*\n\nTitle: {title}\n\n[Click here to Enroll]({final_link})"
-                    send_telegram(msg)
+                    # Go into the post to find the 'Get Coupon' button link
+                    inner_res = requests.get(post_link, headers={'User-Agent': 'Mozilla/5.0'})
+                    inner_soup = BeautifulSoup(inner_res.text, 'html.parser')
+                    btn = inner_soup.select_one("a.btn_offer_block")
+                    
+                    if btn:
+                        # Follow the encoded link to get the final Udemy URL
+                        final_link = get_direct_link(btn['href'])
+                        send_to_telegram(title, final_link)
+        except Exception as e:
+            print(f"⚠️ Error scanning {site}: {e}")
 
 if __name__ == "__main__":
-    start_hunter()
+    start_scan()
