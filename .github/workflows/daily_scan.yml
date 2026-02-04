@@ -1,25 +1,25 @@
-name: Hourly Coupon Scan
+name: Ninja Coupon Hunter
 on:
   schedule:
-    - cron: '0 * * * *'  # This runs every hour automatically
-  workflow_dispatch:      # This adds a "Run" button for you to test it manually
+    - cron: '0 * * * *'  # Runs every hour
+  workflow_dispatch:      # Lets you run it manually for testing
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install libraries
-        run: pip install -r requirements.txt
+      - name: Install Dependencies
+        run: pip install requests beautifulsoup4
 
-      - name: Run the Hunter Script
+      - name: Run Hunter Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
