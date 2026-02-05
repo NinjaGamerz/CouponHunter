@@ -1,4 +1,4 @@
-name: CouponHunter Ultra Scan
+name: CouponHunter Scan
 
 on:
   schedule:
@@ -18,13 +18,12 @@ jobs:
       with:
         python-version: "3.11"
 
-    - name: Install Libraries
+    - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        playwright install --with-deps
 
-    - name: Run CouponHunter Ultra
+    - name: Run CouponHunter
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
