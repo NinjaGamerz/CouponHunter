@@ -1,418 +1,452 @@
-import requests
-from bs4 import BeautifulSoup
+#!/usr/bin/env python3
+# hunter.py - Hybrid Ultra Scraper (Requests + Playwright)
+# Save as hunter.py and run: python hunter.py
 import os
-import json
 import re
 import time
+import json
+import html
+import base64
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, urljoin, unquote, parse_qs
 
-# --- CONFIGURATION ---
+import requests
+from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ----------------- CONFIG -----------------
 HISTORY_FILE = "memory.json"
 SENT_FILE = "sent_courses.txt"
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 LOG_FILE = "hunter.log"
 
-# Enhanced Keyword List - Expanded hacking/security focus
-HACKING_KEYWORDS = [
-    "hacking", "hack", "hacker", "hacking ethically", "ethical hacking", "ethical hacker",
-    "hack the world", "learn hacking", "become hacker", "how to hack",
-    "penetration", "penetration testing", "pentesting", "bug bounty", "bounty hunting",
-    "security", "cybersecurity", "cyber security", "cyber attack", "cyber defense",
-    "exploit", "exploitation", "vulnerability", "zero day", "payload",
-    "malware", "ransomware", "trojan", "worm", "virus",
-    "reverse engineering", "reversing", "cracking", "breaking into systems",
-    "web hacking", "website hacking", "app hacking", "application hacking",
-    "network hacking", "wifi hacking", "wireless hacking", "network penetration",
-    "social engineering", "phishing", "spear phishing", "pretexting"
-]
+# Telegram env
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SECURITY_KEYWORDS = [
-    "osint", "intelligence", "red teaming", "blue team", "purple team",
-    "infosec", "information security", "data security", "privacy",
-    "ctf", "capture the flag", "wargames", "hacking games",
-    "forensics", "digital forensics", "incident response",
-    "crypto", "cryptography", "encryption", "decryption"
-]
-
-NETWORKING_KEYWORDS = [
-    "network", "networking", "ccna", "cisco", "routing", "switching", 
-    "tcp/ip", "dns", "http", "https", "ssl", "tls",
-    "firewall", "vpn", "proxy", "subnetting", "ipv4", "ipv6",
-    "wireshark", "packet", "protocol", "socket", "port", "arp", "bgp"
-]
-
-TOOLS_KEYWORDS = [
-    "kali", "kali linux", "metasploit", "nmap", "sqlmap", "burp", "burp suite",
-    "hydra", "john the ripper", "zap", "owasp zap", "aircrack", "hashcat",
-    "mimikatz", "nessus", "openvas", "nikto", "masscan", "airmon", "aircrack-ng",
-    "hashcat", "hashater", "john hammer", "pass theHash", "responder",
-    "msfvenom", "msfconsole", "beef", "websploit", "sqlninja"
-]
-
-CODING_KEYWORDS = [
-    "python", "bash", "shell", "shell scripting", "powershell", "batch",
-    "linux", "linux terminal", "command line", "terminal", "console",
-    "c++", "c#", "java", "javascript", "node.js", "golang", "go", "rust",
-    "assembly", "perl", "php", "ruby", "sql", "html", "css", "javascript"
-]
-
-ADVANCED_KEYWORDS = [
-    "iot security", "iot hacking", "android security", "android hacking",
-    "ios security", "blockchain security", "smart contracts",
-    "cloud security", "aws security", "azure security", "gcp security",
-    "privilege escalation", "lateral movement", "persistence", "post-exploitation",
-    "container security", "kubernetes security", "docker security",
-    "owasp", "owasp top 10", "zero trust", "defense in depth",
-    "threat modeling", "risk assessment", "security audit", "penetration test"
-]
-
-ALL_KEYWORDS = SECURITY_KEYWORDS + NETWORKING_KEYWORDS + TOOLS_KEYWORDS + CODING_KEYWORDS + ADVANCED_KEYWORDS
-
-# PREMIUM SOURCES - Tested and reliable
-# Note: These sources can be customized - add URLs that work in your region
+# Source map: set use_playwright=True for JS heavy sites
 PREMIUM_SOURCES = {
-    # If these sources don't work, add your own reliable coupon/free course URLs
-    # Format: "Name": "direct_url_to_coupon_or_free_course_page",
-    
-    # Example structure - replace with working URLs in your region:
-    "Coupon_Source_1": "https://couponscorpion.com/category/cyber-security/",
-    "Free_Source_1": "https://www.real.discount/udemy",
-    "Coupon_Source_2": "https://couponscorpion.com/category/development/",
+    "CouponScorpion_100": {"url": "https://couponscorpion.com/category/100-off-coupons/", "use_playwright": True},
+    "RealDiscount_Udemy": {"url": "https://www.real.discount/udemy", "use_playwright": False},
+    "UdemyFreebies": {"url": "https://www.udemyfreebies.com/", "use_playwright": False},
+    "CourseCouponClub": {"url": "https://coursecouponclub.com/", "use_playwright": True},
+    "InfoGnu": {"url": "https://infognu.com/", "use_playwright": False},
 }
 
+# Hacking/security keywords (lowercase)
+KEYWORDS = [
+    "hacking","hack","ethical hacking","penetration","pentesting","bug bounty","cybersecurity",
+    "security","reverse engineering","web hacking","network hacking","social engineering","ctf",
+    "kali","nmap","metasploit","sqlmap","burp"
+]
+KEYWORDS_SET = set(k.lower() for k in KEYWORDS)
+
+# Regex patterns
+UDEMY_REGEX = re.compile(r'(https?://(?:www\.)?udemy\.com/course/[A-Za-z0-9\-\_]+(?:[/?#&][^\s"\'<>]*)?)', re.I)
+UDEMY_ESCAPED_REGEX = re.compile(r'(https?:\\\\/\\\\/[^\'"]*udemy\.com\\/course\\/[A-Za-z0-9\-\_]+)', re.I)
+BASE64_TOKEN = re.compile(r'["\']([A-Za-z0-9+/=]{48,})["\']')
+
+# --------- Helpers & Logging ----------
 def log(msg):
-    """Append to log file with timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_msg = f"[{timestamp}] {msg}"
-    print(log_msg)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
     try:
-        with open(LOG_FILE, "a") as f:
-            f.write(log_msg + "\n")
-    except:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
         pass
 
+def setup_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36")
+    })
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429,500,502,503,504])
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    return s
+
 def load_history():
-    """Load previously seen course links to avoid duplicates"""
     if os.path.exists(HISTORY_FILE):
         try:
-            with open(HISTORY_FILE, "r") as f:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {"sent_links": [], "sent_courses": []}
     return {"sent_links": [], "sent_courses": []}
 
 def save_history(history):
-    """Save history to prevent duplicates"""
     try:
-        with open(HISTORY_FILE, "w") as f:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
     except Exception as e:
         log(f"❌ Error saving history: {e}")
 
-def extract_course_id(udemy_url):
-    """Extract course ID from Udemy URL for deduplication"""
-    try:
-        # Udemy URLs like: https://www.udemy.com/course/python-programming-123456
-        match = re.search(r'/course/([a-zA-Z0-9\-]+)/?', udemy_url)
-        if match:
-            return match.group(1)
-        # Alternative: use full URL as ID
-        return urlparse(udemy_url).path
-    except:
-        return udemy_url
-
-def is_truly_free(title, content=""):
-    """Check if course appears to be 100% off or free"""
-    text = (title + " " + content).lower()
-    
-    # POSITIVE INDICATORS (definitely free)
-    free_indicators = [
-        "100% off", "100% free", "free course", "completely free", 
-        "$0", "free for", "free on udemy", "no cost", "free coupon",
-        "coupon code", "free access", "free lecture", "free section",
-        "free tutorial", "free download", "free content", "complimentary",
-        "gratis", "0$ coupon", "100 percent off"
-    ]
-    
-    for indicator in free_indicators:
-        if indicator in text:
-            return True
-    
-    # NEGATIVE INDICATORS (definitely not free) - Be more careful here
-    paid_indicators = [
-        "save $", "normally $", "was $", "limited time"
-    ]
-    
-    # Only reject if it's clearly a discount (not 100%)
-    for paid in paid_indicators:
-        if paid in text:
-            # Check if it explicitly says "100%" or "free"
-            if "100%" not in text and "free" not in text:
-                continue  # Don't reject, might be free
-            
-    # If has keyword + "free" anywhere, ACCEPT
-    if "free" in text.lower():
-        if any(k.lower() in text for k in ALL_KEYWORDS):
-            return True
-    
-    # If title has keyword + suspicious price pattern, check carefully
-    # "hacking 100% off" = accept
-    # "hacking course $199" = reject
-    if any(k.lower() in title.lower() for k in ALL_KEYWORDS):
-        # If it says "$" but not "100%", reject unless it says "free"
-        if "$" in text and "100%" not in text and "free" not in text:
-            if "$0" not in text:
-                return False
-    
-    return False
-
-def get_real_udemy_link(url, headers):
-    """Extract the actual Udemy link from redirect/coupon pages"""
-    try:
-        res = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-        
-        # Try multiple methods to find Udemy link
-        
-        # Method 1: Direct regex search
-        matches = re.findall(r'https?://(?:www\.)?udemy\.com/course/[^\s"\'<>]+', res.text)
-        if matches:
-            # Clean up and return first match
-            link = matches[0].split('"')[0].split("'")[0]
-            return link
-        
-        # Method 2: Meta tags
-        soup = BeautifulSoup(res.text, 'html.parser')
-        og_url = soup.find('meta', property='og:url')
-        if og_url and 'udemy' in og_url.get('content', ''):
-            return og_url['content']
-        
-        # Method 3: Look for button/link with Udemy URL
-        for link_tag in soup.find_all('a'):
-            href = link_tag.get('href', '')
-            if 'udemy.com/course' in href:
-                return href
-        
-        # If nothing found, return original
-        return url
-    except Exception as e:
-        log(f"⚠️ Error extracting link from {url}: {e}")
-        return url
-
+# --------- Telegram ----------
 def send_telegram(title, link, source=""):
-    """Send course via Telegram with rich formatting"""
     if not TOKEN or not CHAT_ID:
-        log(f"⚠️ Telegram not configured (TOKEN/CHAT_ID missing)")
+        log("⚠️ Telegram not configured (TOKEN/CHAT_ID missing)")
         return False
-    
     try:
-        course_id = extract_course_id(link)
+        safe_title = html.escape(title)
+        safe_link = html.escape(link)
+        safe_source = html.escape(source)
         text = (
-            f"🔥 *100% FREE UDEMY COURSE FOUND!*\n\n"
-            f"📚 *{title}*\n\n"
-            f"📍 Source: {source}\n"
-            f"🔗 [GET IT NOW]({link})\n"
-            f"⏰ Found: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            f"<b>🔥 100% FREE UDEMY COURSE FOUND!</b>\n\n"
+            f"<b>{safe_title}</b>\n"
+            f"Source: {safe_source}\n"
+            f"<a href=\"{safe_link}\">Get it on Udemy — Click here</a>\n"
+            f"Found: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
-        
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": False
-        }
-        
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            log(f"✅ Telegram sent: {title}")
+        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
+        resp = requests.post(url, json=payload, timeout=12)
+        if resp.status_code == 200:
+            log(f"✅ Telegram sent: {title[:80]}")
             return True
         else:
-            log(f"❌ Telegram error: {response.text}")
+            log(f"❌ Telegram error ({resp.status_code}): {resp.text[:200]}")
             return False
     except Exception as e:
-        log(f"❌ Telegram error: {e}")
+        log(f"❌ Telegram exception: {e}")
         return False
 
-def scrape_source(source_name, source_url, headers):
-    """Scrape a specific source for free courses - Universal approach"""
-    courses_found = []
-    
+# --------- Extraction utilities (requests) ----------
+def safe_get(session, url, timeout=12):
     try:
-        log(f"🔍 Scanning: {source_name}")
-        res = requests.get(source_url, headers=headers, timeout=15)
-        res.encoding = 'utf-8'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # UNIVERSAL STRATEGY: Find all links and filter aggressively
-        all_links = soup.find_all('a', href=True)
-        processed = set()
-        
-        for link_tag in all_links:
-            try:
-                href = link_tag.get('href', '').strip()
-                link_text = link_tag.get_text(strip=True)
-                
-                # Skip invalid/duplicate
-                if not href or href in processed or len(link_text) < 3:
-                    continue
-                processed.add(href)
-                
-                # Must be a valid URL
-                if not href.startswith('http'):
-                    continue
-                
-                # Must have udemy in it OR looks like a course post
-                is_udemy_direct = 'udemy.com/course' in href
-                is_course_post = any(k in href.lower() for k in ['course', 'coupon', 'free', 'lesson'])
-                
-                if not (is_udemy_direct or is_course_post):
-                    continue
-                
-                # Check if title matches our keywords
-                full_text = (link_text + " " + href).lower()
-                if not any(k.lower() in full_text for k in ALL_KEYWORDS):
-                    continue
-                
-                # If direct Udemy link, verify
-                if is_udemy_direct:
-                    title = link_text if link_text else href.split('/course/')[-1].replace('-', ' ')[:60]
-                    if not is_truly_free(title, href):
-                        continue
-                    
-                    course_id = extract_course_id(href)
-                    
-                    courses_found.append({
-                        'title': title[:100],
-                        'link': href,
-                        'source': source_name,
-                        'post_link': href
-                    })
-                    log(f"  ✓ Direct: {title[:55]}")
-                    
-                else:
-                    # It's a post, try to extract real Udemy link
-                    title = link_text[:100]
-                    
-                    try:
-                        inner_res = requests.get(href, headers=headers, timeout=10)
-                        inner_text = inner_res.text.lower()
-                        
-                        # Look for Udemy course link in the page
-                        udemy_links = re.findall(r'https?://[^\s"\'<>]*udemy\.com/course/[^\s"\'<>]+', inner_res.text)
-                        
-                        if udemy_links:
-                            final_link = udemy_links[0].split('"')[0].split("'")[0]
-                            
-                            if is_truly_free(title, inner_text):
-                                courses_found.append({
-                                    'title': title,
-                                    'link': final_link,
-                                    'source': source_name,
-                                    'post_link': href
-                                })
-                                log(f"  ✓ Found: {title[:55]}")
-                    except:
-                        pass
-                
-                time.sleep(0.2)
-                
-            except Exception as e:
-                pass
-        
-        log(f"  ✅ Complete: {len(courses_found)} courses")
-        
+        r = session.get(url, timeout=timeout, allow_redirects=True)
+        r.encoding = r.apparent_encoding or 'utf-8'
+        log(f"   GET {url} -> {r.status_code} ({len(r.content)} bytes) final_url={getattr(r,'url',url)}")
+        return r
     except Exception as e:
-        log(f"  ❌ Error: {str(e)[:80]}")
-    
-    return courses_found
+        log(f"   ⚠️ GET error {url}: {e}")
+        return None
 
+def extract_udemy_from_text(text):
+    found = set()
+    if not text:
+        return found
+    for m in UDEMY_REGEX.finditer(text):
+        u = m.group(1).rstrip('"\').,; ')
+        found.add(u)
+    for m in UDEMY_ESCAPED_REGEX.finditer(text):
+        esc = m.group(1)
+        dec = esc.replace('\\\\/','/').replace('\\/','/').replace('http:\\/\\/','http://').replace('https:\\/\\/','https://')
+        found.add(dec)
+    # try to decode base64 tokens inside text
+    for t in BASE64_TOKEN.findall(text):
+        try:
+            dec = base64.b64decode(t + '===').decode('utf-8', errors='ignore')
+            if 'udemy.com/course' in dec:
+                found.add(dec)
+        except Exception:
+            pass
+    cleaned = set(unquote(html.unescape(u)) for u in found)
+    return cleaned
+
+def decode_targets_from_query(url):
+    found = set()
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        for k, vals in qs.items():
+            if any(x in k.lower() for x in ('url','to','target','redirect','link','u')):
+                for v in vals:
+                    v2 = unquote(v)
+                    if 'udemy.com/course' in v2:
+                        found.add(v2)
+                    if len(v2) > 40 and re.match(r'^[A-Za-z0-9+/=]+$', v2):
+                        try:
+                            dec = base64.b64decode(v2 + '===').decode('utf-8', errors='ignore')
+                            if 'udemy.com/course' in dec:
+                                found.add(dec)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    return found
+
+def resolve_and_extract_udemy(session, candidate_url):
+    found = set()
+    found |= decode_targets_from_query(candidate_url)
+    r = safe_get(session, candidate_url)
+    if not r:
+        return found
+    # check redirect chain & final url
+    try:
+        chain = [h.url for h in (r.history or [])] + [r.url]
+        for u in chain:
+            if 'udemy.com/course' in u.lower():
+                found.add(u)
+        found |= extract_udemy_from_text(r.text)
+    except Exception as e:
+        log(f"   ⚠️ resolve error: {e}")
+    return found
+
+# --------- Requests-based scraper for "fast" sources ----------
+def scrape_requests_source(session, source_name, source_url):
+    results = []
+    log(f"🔍 (requests) Scanning: {source_name} -> {source_url}")
+    r = safe_get(session, source_url)
+    if not r:
+        return results
+    soup = BeautifulSoup(r.text, "html.parser")
+    page_title = (soup.title.string or "").strip() if soup.title else ""
+    meta_desc = ''
+    md = soup.find('meta', attrs={'name':'description'})
+    if md and md.get('content'):
+        meta_desc = md['content']
+
+    # quick page-level scan for plain udemy links
+    page_found = extract_udemy_from_text(r.text)
+    for u in page_found:
+        results.append({"title": page_title or u, "link": u, "source": source_name, "post_link": source_url})
+    if page_found:
+        log(f"   ✓ Page-level found: {len(page_found)}")
+
+    anchors = soup.find_all(['a','button','input'], href=True) + soup.find_all(['a','button','input'])
+    processed = set()
+    for tag in anchors:
+        try:
+            # gather candidate URLs
+            cands = set()
+            if tag.get('href'):
+                cands.add(urljoin(source_url, tag.get('href').strip()))
+            for attr in ('data-href','data-url','data-clipboard-text','data-link','data-redirect'):
+                v = tag.get(attr)
+                if v:
+                    cands.add(urljoin(source_url, v.strip()))
+            onclick = tag.get('onclick') or ''
+            if onclick:
+                for m in re.findall(r"(https?:\/\/[^\)'\"]+)", onclick):
+                    cands.add(m.strip())
+            text = (tag.get_text(" ",strip=True) or '')
+            if 'http' in text:
+                cands |= extract_udemy_from_text(text)
+            for cand in list(cands):
+                if not cand or cand in processed:
+                    continue
+                processed.add(cand)
+                if 'udemy.com/course' in cand.lower():
+                    rr = safe_get(session, cand)
+                    final = rr.url if rr else cand
+                    title = (tag.get_text(" ",strip=True) or page_title or final)[:150]
+                    # accept if seems free
+                    if is_probably_free(title, meta_desc):
+                        results.append({"title": title, "link": final, "source": source_name, "post_link": source_url})
+                        log(f"    ✓ Direct udemy href: {title[:80]}")
+                    continue
+                # otherwise resolve candidate
+                resolved = resolve_and_extract_udemy(session, cand)
+                for u in resolved:
+                    if is_probably_free((tag.get_text(" ",strip=True) or page_title), r.text[:1000]):
+                        results.append({"title": (tag.get_text(" ",strip=True) or page_title)[:150], "link": u, "source": source_name, "post_link": cand})
+                        log(f"    ✓ Resolved -> Udemy: {u}")
+                time.sleep(0.08)
+        except Exception as e:
+            log(f"   ⚠️ requests tag error: {e}")
+            continue
+    # dedupe
+    uniq = {}
+    for r in results:
+        if r['link'] not in uniq:
+            uniq[r['link']] = r
+    final = list(uniq.values())
+    log(f"  ✅ {len(final)} courses found (requests) on {source_name}")
+    return final
+
+def is_probably_free(title, context_text=''):
+    t = (title or '') + ' ' + (context_text or '')
+    txt = t.lower()
+    positives = ["100% off","100% free","100 percent","free coupon","free course","$0","gratis","100%"]
+    if any(p in txt for p in positives):
+        return True
+    if "free" in txt and any(k in txt for k in KEYWORDS_SET):
+        return True
+    return False
+
+# --------- Playwright-based scraper for JS-heavy sites ----------
+def scrape_playwright_source(source_name, source_url, max_articles=200, headless=True):
+    results = []
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        log("⚠️ Playwright not installed; skipping Playwright sources. (Install playwright to enable)")
+        return results
+
+    log(f"🔍 (playwright) Scanning: {source_name} -> {source_url}")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(source_url, timeout=30000, wait_until="networkidle")
+        except Exception as e:
+            log(f"   ⚠️ play load fail: {e}")
+            try:
+                page.close()
+            except:
+                pass
+            browser.close()
+            return results
+
+        # gather candidate article links heuristics
+        candidates = set()
+        try:
+            anchors = page.query_selector_all("a[href]")
+            for a in anchors:
+                try:
+                    href = a.get_attribute("href") or ""
+                    txt = (a.inner_text() or "").lower()
+                    full = urljoin(source_url, href)
+                    if any(x in full.lower() for x in ['/free','coupon','udemy','course','deal','/free-']):
+                        candidates.add(full)
+                    if '100%' in txt or 'free' in txt:
+                        candidates.add(full)
+                except Exception:
+                    continue
+            # also page-level regex
+            page_html = page.content()
+            for u in UDEMY_REGEX.findall(page_html):
+                candidates.add(u)
+        except Exception as e:
+            log(f"   ⚠️ gather candidates error: {e}")
+
+        candidates = list(candidates)[:max_articles]
+        log(f"   Candidates to open: {len(candidates)}")
+
+        for art in candidates:
+            try:
+                art_page = context.new_page()
+                try:
+                    art_page.goto(art, timeout=30000, wait_until="networkidle")
+                except Exception:
+                    # some articles require interaction; continue anyway
+                    pass
+                # try extracting udemy from final DOM + scripts
+                html_content = art_page.content()
+                found = extract_udemy_from_text(html_content)
+                # also inspect anchors
+                try:
+                    anchors = art_page.query_selector_all("a")
+                    for a in anchors:
+                        try:
+                            href = a.get_attribute("href") or ""
+                            if href and "udemy.com/course" in href.lower():
+                                found.add(urljoin(art_page.url, href))
+                        except:
+                            pass
+                except:
+                    pass
+                # click typical "get coupon"/"get it" buttons to open popups
+                if not found:
+                    try:
+                        btns = art_page.query_selector_all("a,button,input")
+                        for b in btns:
+                            try:
+                                label = (b.inner_text() or "").lower() + " " + (b.get_attribute("value") or "")
+                                if any(k in label for k in ('coupon','get coupon','claim','get it','grab','claim coupon')):
+                                    try:
+                                        with context.expect_page(timeout=3000) as new_page_info:
+                                            b.click(timeout=2000)
+                                        new_p = new_page_info.value
+                                        found |= extract_udemy_from_text(new_p.content())
+                                        try:
+                                            new_p.close()
+                                        except:
+                                            pass
+                                    except Exception:
+                                        href = b.get_attribute("href") or ""
+                                        if href and "udemy" in href.lower():
+                                            found |= extract_udemy_from_text(href)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                # accept found
+                for u in found:
+                    results.append({"title": art_page.title() or art, "link": u, "source": source_name, "post_link": art})
+                try:
+                    art_page.close()
+                except:
+                    pass
+                time.sleep(0.12)
+            except Exception as e:
+                log(f"   ⚠️ playwright article error: {e}")
+                continue
+
+        try:
+            page.close()
+        except:
+            pass
+        browser.close()
+    # dedupe
+    uniq = {}
+    for r in results:
+        if r['link'] not in uniq:
+            uniq[r['link']] = r
+    final = list(uniq.values())
+    log(f"  ✅ {len(final)} courses found (playwright) on {source_name}")
+    return final
+
+# ---------------- Main scanning flow ----------------
 def start_scan():
-    """Main scanning function"""
     log("=" * 60)
-    log("🚀 Starting CouponHunter V2 (Enhanced - Hacking Focus)...")
+    log("🚀 Starting Hybrid CouponHunter (Ultra)")
     log("=" * 60)
-    
-    # Check if sources are configured
-    if not PREMIUM_SOURCES or len([v for v in PREMIUM_SOURCES.values() if v and v.startswith('http')]) == 0:
-        log("⚠️  No working sources configured yet!")
-        log("📚 INSTRUCTIONS:")
-        log("   1. Find reliable free Udemy course aggregator URLs")
-        log("   2. Edit PREMIUM_SOURCES in hunter.py")
-        log("   3. Replace URLs with working sites that have 100% free courses")
-        log("")
-        log("Popular sites to try:")
-        log("   • https://couponscorpion.com/category/cyber-security/")
-        log("   • https://www.real.discount/udemy")
-        log("   • https://www.tutorialbar.com/ (search 'free')")
-        log("   • FreeUdemy coupon sites (check your country's version)")
-        log("")
-        log("Or add direct Udemy coupon URLs you find")
-        return
-    
+
+    session = setup_session()
     history = load_history()
     sent_links = set(history.get("sent_links", []))
     sent_courses = set(history.get("sent_courses", []))
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    
-    new_finds = 0
     all_courses = []
-    
-    # Scan all sources
-    for source_name, source_url in PREMIUM_SOURCES.items():
-        if not source_url or not source_url.startswith('http'):
-            log(f"⏭️  Skipping invalid source: {source_name}")
-            continue
-            
+    new_finds = 0
+
+    # iterate sources
+    for name, meta in PREMIUM_SOURCES.items():
+        url = meta.get("url")
+        use_playwright = bool(meta.get("use_playwright", False))
         try:
-            courses = scrape_source(source_name, source_url, headers)
+            if use_playwright:
+                courses = scrape_playwright_source(name, url)
+            else:
+                courses = scrape_requests_source(session, name, url)
             all_courses.extend(courses)
         except Exception as e:
-            log(f"❌ Error processing {source_name}: {str(e)[:80]}")
-        
-        time.sleep(1)
-    
-    # Deduplicate and send
+            log(f"❌ Error scanning {name}: {e}")
+        time.sleep(0.8)
+
+    # dedupe & send
     sent_this_run = set()
-    for course in all_courses:
+    for c in all_courses:
         try:
-            course_id = extract_course_id(course['link'])
-            
-            # Skip if already sent
-            if course['link'] in sent_links or course_id in sent_courses or course_id in sent_this_run:
-                log(f"⏭️  Duplicate: {course['title'][:50]}")
+            cid_match = re.search(r'/course/([A-Za-z0-9\-\_]+)', c['link'], re.I)
+            cid = cid_match.group(1).lower() if cid_match else c['link']
+            if c['link'] in sent_links or cid in sent_courses or cid in sent_this_run:
+                log(f"⏭️ Duplicate: {c['title'][:50]}")
                 continue
-            
-            # Send to Telegram
-            if send_telegram(course['title'], course['link'], course['source']):
-                sent_links.add(course['link'])
-                sent_courses.add(course_id)
-                sent_this_run.add(course_id)
+            if send_telegram(c['title'], c['link'], c.get('source','')):
+                sent_links.add(c['link'])
+                sent_courses.add(cid)
+                sent_this_run.add(cid)
                 new_finds += 1
-                
-                # Also save to sent_courses.txt
                 try:
-                    with open(SENT_FILE, "a") as f:
-                        f.write(f"{course['link']} | {course['title']} | {course['source']}\n")
-                except:
+                    with open(SENT_FILE, "a", encoding="utf-8") as f:
+                        f.write(f"{c['link']} | {c['title']} | {c.get('source','')}\n")
+                except Exception:
                     pass
-        
         except Exception as e:
-            log(f"❌ Error processing course: {str(e)[:80]}")
-    
-    # Update history
+            log(f"❌ Error sending course: {e}")
+
     history["sent_links"] = list(sent_links)
     history["sent_courses"] = list(sent_courses)
     save_history(history)
-    
+
     log("=" * 60)
-    log(f"🏁 Scan complete! Found {new_finds} new free courses")
-    log(f"📊 Total unique courses tracked: {len(sent_courses)}")
-    log(f"📌 Keywords tracked: {len(ALL_KEYWORDS)} (Heavy on hacking)")
+    log(f"🏁 Scan complete! New finds: {new_finds}. Total tracked: {len(sent_courses)}")
     log("=" * 60)
 
 if __name__ == "__main__":
