@@ -1,43 +1,53 @@
 import requests
 from bs4 import BeautifulSoup
 import os
+import json
 import re
 
-# --- CONFIG ---
-# 1. EXPANDED KEYWORDS (Finds everything)
+# --- CONFIGURATION ---
+HISTORY_FILE = "memory.json"
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# The Massive Keyword List
 KEYWORDS = [
     "hacking", "cyber", "python", "bug bounty", "nmap", "sqlmap", "linux", "security", 
     "penetration", "web dev", "ethical", "forensics", "malware", "red teaming", 
     "owasp", "wireshark", "reverse engineering", "network", "cisco", "ccna", "bash", 
-    "powershell", "exploit", "ctf", "kali", "metasploit", "privilege escalation"
+    "powershell", "exploit", "ctf", "kali", "metasploit", "privilege escalation",
+    "social engineering", "osint", "android security", "iot security"
 ]
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-HISTORY_FILE = "sent_courses.txt"
-
 def load_history():
-    """Loads the list of courses we already sent"""
-    if not os.path.exists(HISTORY_FILE):
-        return set()
-    with open(HISTORY_FILE, "r") as f:
-        return set(line.strip() for line in f)
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
 
-def save_to_history(link):
-    """Saves a new link to our memory"""
-    with open(HISTORY_FILE, "a") as f:
-        f.write(f"{link}\n")
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f)
 
-def send_telegram(text):
+def send_telegram(title, link):
     if TOKEN and CHAT_ID:
+        text = f"🔥 *100% FREE FOUND!*\n\n🛡️ *{title}*\n\n🔗 [GET IT NOW]({link})"
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": False}
-        requests.post(url, json=payload)
+        try:
+            requests.post(url, json=payload)
+        except:
+            pass
 
-def get_final_link(url):
-    """Follows redirects to get the real Udemy link"""
+def get_real_udemy_link(url):
+    """Digs through the intermediate page to find the clean Udemy link"""
     try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=10)
+        
+        # Look for the Udemy URL pattern in the HTML
         found = re.search(r'https?://[^\s<>"]+udemy\.com/[^\s<>"]+', res.text)
         if found:
             clean = found.group(0).split('"')[0].split("'")[0]
@@ -46,18 +56,19 @@ def get_final_link(url):
     except:
         return url
 
-def check_if_free(soup):
-    """Checks if the coupon page actually says 'Free' or '100% Off'"""
-    text_content = soup.get_text().lower()
-    if "100% off" in text_content or "price: free" in text_content or "free coupon" in text_content:
+def is_strictly_free(title):
+    """The Gatekeeper: Only allows explicit 100% or Free titles"""
+    t = title.lower()
+    if "100%" in t or "free" in t:
         return True
     return False
 
 def start_scan():
-    print("🚀 Starting Smart Hunter V7...")
-    sent_links = load_history()
+    print("🚀 Starting Ruthless Hunter V8...")
+    history = load_history()
+    new_finds = 0
     
-    # 2. MORE SOURCES (Digs deeper)
+    # We prioritize categories that are most likely to have 100% off deals
     sources = [
         "https://couponscorpion.com/category/cyber-security/",
         "https://couponscorpion.com/category/development/",
@@ -65,57 +76,77 @@ def start_scan():
         "https://www.tutorialbar.com/category/it-software/network-security/"
     ]
     
-    new_finds = 0
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
     for site in sources:
-        print(f"🔍 Scraping {site}...")
+        print(f"🔍 Scanning: {site}")
         try:
-            res = requests.get(site, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            res = requests.get(site, headers=headers, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            for item in soup.find_all(['h3', 'h2']):
-                title = item.get_text().strip()
-                link_tag = item.find('a')
+            # Find all potential courses
+            articles = soup.find_all('article') # CouponScorpion uses <article>
+            if not articles:
+                # Fallback for TutorialBar
+                articles = soup.find_all('div', class_='ml-item')
+
+            for article in articles:
+                # Try to find the title tag (h2 or h3)
+                title_tag = article.find(['h3', 'h2'])
+                if not title_tag: continue
                 
-                # Check 1: Keyword Match
-                if link_tag and any(word.lower() in title.lower() for word in KEYWORDS):
-                    post_url = link_tag['href']
+                title = title_tag.get_text().strip()
+                link_tag = article.find('a')
+                if not link_tag: continue
+                
+                post_link = link_tag['href']
+
+                # --- FILTER 1: KEYWORDS ---
+                if not any(k in title.lower() for k in KEYWORDS):
+                    continue
+
+                # --- FILTER 2: HISTORY (DUPLICATES) ---
+                if post_link in history:
+                    continue 
+
+                # --- FILTER 3: STRICT 100% CHECK ---
+                # If the title doesn't say "100%" or "Free", we kill it immediately.
+                if not is_strictly_free(title):
+                    print(f"💰 Rejected (Likely Paid): {title}")
+                    continue
+
+                # If we survived all filters, let's get the link
+                print(f"✅ Processing: {title}")
+                
+                # Dig deeper to find the button
+                try:
+                    inner = requests.get(post_link, headers=headers, timeout=10)
+                    inner_soup = BeautifulSoup(inner.text, 'html.parser')
                     
-                    # Check 2: Duplicate Check (Have we seen this specific link before?)
-                    if post_url in sent_links:
-                        print(f"⏩ Skipping (Already Sent): {title}")
-                        continue
+                    # Double check inner page for price cues if possible
+                    if "$1" in inner_soup.get_text() or "$9" in inner_soup.get_text():
+                        # Sometimes they hide the price, but if we see a $ sign, risky.
+                        # But since we passed the Title check, we usually trust it.
+                        pass
 
-                    # Go deeper
-                    try:
-                        inner = requests.get(post_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-                        inner_soup = BeautifulSoup(inner.text, 'html.parser')
+                    btn = inner_soup.select_one("a.btn_offer_block")
+                    if btn:
+                        final_link = get_real_udemy_link(btn['href'])
+                        send_telegram(title, final_link)
                         
-                        # Check 3: Price Check (Is it actually 100% off?)
-                        if not check_if_free(inner_soup):
-                            print(f"💰 Skipping (Not Free): {title}")
-                            continue
-
-                        btn = inner_soup.select_one("a.btn_offer_block")
-                        if btn:
-                            udemy_link = get_final_link(btn['href'])
-                            
-                            # FINAL SEND
-                            print(f"✅ FOUND NEW: {title}")
-                            send_telegram(f"🔥 *FREE HACKING COURSE!*\n\n🛡️ *Title:* {title}\n\n🔗 [ENROLL NOW]({udemy_link})")
-                            
-                            save_to_history(post_url) # Save to memory
-                            sent_links.add(post_url)
-                            new_finds += 1
-                            
-                    except Exception as e:
-                        print(f"⚠️ Error inside post: {e}")
+                        # Add to memory immediately so we don't send it again next loop
+                        history.append(post_link)
+                        new_finds += 1
+                        
+                except Exception as e:
+                    print(f"⚠️ Link Error: {e}")
 
         except Exception as e:
-            print(f"⚠️ Error scanning site: {e}")
+            print(f"⚠️ Site Error: {e}")
 
-    if new_finds == 0:
-        print("😴 No NEW 100% off coupons found this run.")
+    # Save memory to file
+    save_history(history)
+    print(f"🏁 Scan complete. Found {new_finds} new courses.")
 
 if __name__ == "__main__":
     start_scan()
