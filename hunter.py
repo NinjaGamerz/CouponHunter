@@ -298,9 +298,10 @@ def scrape_requests_source(session, source_name, source_url):
                     if full_url not in processed_urls:
                         # Extract course title
                         link_text = link.get_text(strip=True) or title
+                        container_text = container.get_text(" ", strip=True)[:500]
                         
-                        # Check if relevant
-                        if matches_keywords(link_text) and is_free_course(link_text):
+                        # Check if relevant AND free
+                        if matches_keywords(link_text, container_text) and is_free_course(link_text, container_text):
                             results.append({
                                 "title": link_text[:200],
                                 "link": full_url,
@@ -309,6 +310,8 @@ def scrape_requests_source(session, source_name, source_url):
                             })
                             processed_urls.add(full_url)
                             log(f"   ✅ Found: {link_text[:60]}")
+                        else:
+                            log(f"   ⏭️ Skipped (not relevant): {link_text[:60]}")
                 
                 # Check if it's a redirect/intermediate link
                 elif any(x in full_url.lower() for x in ['coupon', 'deal', 'offer', 'redirect', 'go']):
@@ -321,8 +324,9 @@ def scrape_requests_source(session, source_name, source_url):
                             
                             if 'udemy.com/course/' in final_url.lower():
                                 link_text = link.get_text(strip=True) or title
+                                container_text = container.get_text(" ", strip=True)[:500]
                                 
-                                if matches_keywords(link_text) and is_free_course(link_text):
+                                if matches_keywords(link_text, container_text) and is_free_course(link_text, container_text):
                                     results.append({
                                         "title": link_text[:200],
                                         "link": final_url,
@@ -330,6 +334,8 @@ def scrape_requests_source(session, source_name, source_url):
                                         "post_link": full_url
                                     })
                                     log(f"   ✅ Found (redirect): {link_text[:60]}")
+                                else:
+                                    log(f"   ⏭️ Skipped redirect (not relevant): {link_text[:60]}")
                         except:
                             pass
                         
@@ -338,20 +344,25 @@ def scrape_requests_source(session, source_name, source_url):
             log(f"   ⚠️ Container error: {e}")
             continue
     
-    # Also check page-level URLs
+    # Also check page-level URLs (but validate keywords)
     for udemy_url in page_udemy_urls:
         if udemy_url not in processed_urls:
-            processed_urls.add(udemy_url)
             # Extract course slug for title
             match = re.search(r'/course/([^/?#]+)', udemy_url)
             course_slug = match.group(1).replace('-', ' ').title() if match else "Udemy Course"
             
-            results.append({
-                "title": course_slug[:200],
-                "link": udemy_url,
-                "source": source_name,
-                "post_link": source_url
-            })
+            # Check if slug contains any keywords
+            if matches_keywords(course_slug, page_title):
+                processed_urls.add(udemy_url)
+                results.append({
+                    "title": course_slug[:200],
+                    "link": udemy_url,
+                    "source": source_name,
+                    "post_link": source_url
+                })
+                log(f"   ✅ Found page-level: {course_slug[:60]}")
+            else:
+                log(f"   ⏭️ Skipped page-level (not relevant): {course_slug[:60]}")
     
     # Deduplicate results
     unique_results = {}
@@ -430,6 +441,8 @@ def scrape_playwright_source(session, source_name, source_url, max_articles=PLAY
             
             # Process article links
             processed = set()
+            found_urls = set()  # Track URLs to prevent duplicates
+            
             for article_url in list(article_links)[:max_articles]:
                 if article_url in processed:
                     continue
@@ -463,14 +476,24 @@ def scrape_playwright_source(session, source_name, source_url, max_articles=PLAY
                         article_udemy_urls = extract_udemy_urls(article_html)
                         
                         for udemy_url in article_udemy_urls:
-                            if matches_keywords(article_title) and is_free_course(article_title, article_html[:2000]):
-                                results.append({
-                                    "title": article_title[:200],
-                                    "link": udemy_url,
-                                    "source": source_name,
-                                    "post_link": article_url
-                                })
-                                log(f"   ✅ Found in article: {article_title[:60]}")
+                            # Skip if already found this URL
+                            if udemy_url in found_urls:
+                                continue
+                            
+                            # Check if course matches keywords AND is free
+                            if is_free_course(article_title, article_html[:2000]):
+                                # Also check the article content for keywords
+                                if matches_keywords(article_title, article_html[:3000]):
+                                    found_urls.add(udemy_url)
+                                    results.append({
+                                        "title": article_title[:200],
+                                        "link": udemy_url,
+                                        "source": source_name,
+                                        "post_link": article_url
+                                    })
+                                    log(f"   ✅ Found in article: {article_title[:60]}")
+                                else:
+                                    log(f"   ⏭️ Skipped (not relevant): {article_title[:60]}")
                         
                         article_page.close()
                     except:
@@ -484,17 +507,24 @@ def scrape_playwright_source(session, source_name, source_url, max_articles=PLAY
                     log(f"   ⚠️ Article processing error: {str(e)[:100]}")
                     continue
             
-            # Add page-level Udemy URLs
+            # Add page-level Udemy URLs (but validate keywords)
             for udemy_url in page_udemy_urls:
-                match = re.search(r'/course/([^/?#]+)', udemy_url)
-                title = match.group(1).replace('-', ' ').title() if match else "Udemy Course"
-                
-                results.append({
-                    "title": title,
-                    "link": udemy_url,
-                    "source": source_name,
-                    "post_link": source_url
-                })
+                if udemy_url not in found_urls:
+                    match = re.search(r'/course/([^/?#]+)', udemy_url)
+                    title = match.group(1).replace('-', ' ').title() if match else "Udemy Course"
+                    
+                    # Check if matches keywords
+                    if matches_keywords(title, html_content[:2000]):
+                        found_urls.add(udemy_url)
+                        results.append({
+                            "title": title,
+                            "link": udemy_url,
+                            "source": source_name,
+                            "post_link": source_url
+                        })
+                        log(f"   ✅ Found page-level: {title[:60]}")
+                    else:
+                        log(f"   ⏭️ Skipped page-level (not relevant): {title[:60]}")
             
             page.close()
             browser.close()
