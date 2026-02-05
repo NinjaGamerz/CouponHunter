@@ -20,7 +20,11 @@ KEYWORDS = [
     "ghidra", "docker", "kubernetes", "aws", "cloud security", "api", "rest",
     "javascript", "node", "react", "go", "golang", "rust", "java", "c++",
     "programming", "coding", "developer", "software", "web development",
-    "database", "sql", "mongodb", "postgresql", "devops", "git", "github"
+    "database", "sql", "mongodb", "postgresql", "devops", "git", "github", "bugbounty",
+    "bug bounty", "vulnerability research", "security research", "ethical hacking",
+    "cybersecurity", "information security", "infosec", "threat hunting", "red teaming",
+    "blue teaming", "offense", "defense", "cyber defense", "cyber offense", "cyber attack",
+    "cyber defense", "cyber attack", "cyber defense", "cyber offense", "cyber attack", "cyber"
 ]
 
 SOURCES = [
