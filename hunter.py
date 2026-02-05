@@ -169,10 +169,13 @@ def is_valid_http_url(u):
     if not u:
         return False
     u = u.strip()
-    # reject javascript:, mailto:, tel:, fragments, data:, void(0)
-    if u.startswith("javascript:") or u.startswith("mailto:") or u.startswith("tel:") or u.startswith("data:"):
-        return False
-    if u in ("#", "/", "javascript:void(0)", "javascript:void(0);"):
+    # AGGRESSIVE: reject any non-http schemes
+    u_lower = u.lower()
+    bad_schemes = ('javascript:', 'mailto:', 'tel:', 'data:', 'void', '#', 'ftp:')
+    for scheme in bad_schemes:
+        if u_lower.startswith(scheme):
+            return False
+    if '#' in u or u in ("/", ""):
         return False
     parsed = urlparse(u)
     # allow relative paths (start with /), or http/https absolute
@@ -182,19 +185,25 @@ def is_valid_http_url(u):
         return True
     return False
 
+def is_probably_free(title, content=""):
+    """Check if title/content indicates a free course."""
+    combined = (title + " " + str(content)).lower()
+    free_keywords = ("100% off", "free", "coupon", "$0", "free course", "free udemy", "no cost")
+    return any(k in combined for k in free_keywords)
+
 def resolve_and_extract(session, candidate_url):
     """Follow redirects and inspect body/params — but only for valid http urls."""
     found = set()
     try:
         if not is_valid_http_url(candidate_url):
-            # normalized log only once
+            # Skip non-http URLs silently
             return found
         found |= decode_targets_from_query(candidate_url)
         try:
             r = session.get(candidate_url, timeout=12, allow_redirects=True)
             r.encoding = r.apparent_encoding or 'utf-8'
         except Exception as e:
-            log(f"   ⚠️ network follow failed for candidate: {candidate_url[:140]} -> {e}")
+            # Reduced logging noise - skip logging for non-fatal candidate errors
             return found
         try:
             chain_urls = [h.url for h in (r.history or [])] + [r.url]
@@ -273,6 +282,9 @@ def scrape_requests_source(session, source_name, source_url):
 
             for cand in list(cands):
                 if not cand or cand in processed:
+                    continue
+                # Skip obviously invalid URLs early
+                if not is_valid_http_url(cand):
                     continue
                 processed.add(cand)
 
@@ -357,8 +369,11 @@ def scrape_playwright_source(requests_session, source_name, source_url, max_arti
 
             for art in candidates:
                 try:
-                    # skip invalid
+                    # skip invalid URLs (javascript:, fragments, etc.)
                     if not is_valid_http_url(art):
+                        continue
+                    # extra safety: skip base64-looking URLs
+                    if 'javascript' in art.lower() or 'void' in art.lower():
                         continue
                     art_page = context.new_page()
                     try:
