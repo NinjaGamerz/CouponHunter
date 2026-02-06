@@ -21,7 +21,8 @@ KEYWORDS = [
     "bug bounty", "kali", "metasploit", "nmap", "burp", "wireshark", "python",
     "bash", "linux", "network", "web security", "sql injection", "xss", "oscp",
     "ceh", "exploit", "vulnerability", "malware", "forensic", "osint", "red team",
-    "blue team", "ctf", "reverse engineering"
+    "blue team", "ctf", "reverse engineering", "cybersecurity", "offensive security",
+    "course", "training", "learning", "tutorial", "programming", "development"
 ]
 
 HEADERS = {
@@ -90,9 +91,9 @@ def scrape_couponscorpion():
                     post_links.append(href)
         
         print(f"   Found {len(post_links)} course pages to check")
-        
+
         # Visit each course page to extract Udemy link
-        for post_url in post_links[:30]:  # Limit to 30 to avoid timeout
+        for post_url in post_links[:60]:  # Limit to 60 to get more courses
             try:
                 pr = requests.get(post_url, headers=HEADERS, timeout=10)
                 psoup = BeautifulSoup(pr.text, 'html.parser')
@@ -140,106 +141,114 @@ def scrape_idownloadcoupon():
     """Scrape iDownloadCoupon"""
     print("\n🔍 Scanning: iDownloadCoupon")
     courses = []
-    
+    search_terms = ["hacking", "security", "python", "linux", "cybersecurity"]
+
     try:
-        url = "https://idownloadcoupon.com/?s=hacking&post_type=product"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Find product links
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if 'idownloadcoupon.com' in href and '/product/' in href:
-                try:
-                    # Visit product page
-                    pr = requests.get(href, headers=HEADERS, timeout=10)
-                    psoup = BeautifulSoup(pr.text, 'html.parser')
-                    
-                    # Get title
-                    title_elem = psoup.find('h1', class_='product_title')
-                    title = title_elem.text.strip() if title_elem else "Unknown"
-                    
-                    # Find Udemy link
-                    for link in psoup.find_all('a', href=True):
-                        if 'udemy.com/course/' in link['href']:
-                            if matches_keywords(title):
-                                courses.append({'title': title, 'url': link['href']})
-                                print(f"   ✅ {title[:50]}")
-                            break
-                    
-                    time.sleep(0.5)
-                except:
-                    continue
-                    
+        for search_term in search_terms:
+            url = f"https://idownloadcoupon.com/?s={search_term}&post_type=product"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(r.text, 'html.parser')
+
+            # Find product links
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'idownloadcoupon.com' in href and '/product/' in href:
+                    try:
+                        # Visit product page
+                        pr = requests.get(href, headers=HEADERS, timeout=10)
+                        psoup = BeautifulSoup(pr.text, 'html.parser')
+
+                        # Get title
+                        title_elem = psoup.find('h1', class_='product_title')
+                        title = title_elem.text.strip() if title_elem else "Unknown"
+
+                        # Find Udemy link
+                        for link in psoup.find_all('a', href=True):
+                            if 'udemy.com/course/' in link['href']:
+                                if matches_keywords(title) and link['href'] not in [c['url'] for c in courses]:
+                                    courses.append({'title': title, 'url': link['href']})
+                                    print(f"   ✅ {title[:50]}")
+                                break
+
+                        time.sleep(0.3)
+                    except:
+                        continue
+
+            time.sleep(1)
+
     except Exception as e:
         print(f"   ❌ Error: {e}")
-    
+
     return courses
 
 def scrape_udemy24():
     """Scrape Udemy24"""
     print("\n🔍 Scanning: Udemy24")
     courses = []
-    
+    search_terms = ["hacking", "security", "python", "linux", "ethical"]
+
     try:
-        # Search page
-        url = "https://www.udemy24.com/search?q=hacking"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Find blog post links
-        post_links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if 'udemy24.com/2' in href:  # Blog posts are dated like /2025/11/...
-                if href not in post_links:
-                    post_links.append(href)
-        
-        # Visit each post
-        for post_url in post_links[:20]:
-            try:
-                pr = requests.get(post_url, headers=HEADERS, timeout=10)
-                psoup = BeautifulSoup(pr.text, 'html.parser')
-                
-                # Get title
-                title_elem = psoup.find('h1') or psoup.find('title')
-                title = title_elem.text.strip() if title_elem else "Unknown"
-                
-                # Find Udemy link in post content
-                content = psoup.find('div', class_='post-body') or psoup.find('article')
-                if content:
-                    for a in content.find_all('a', href=True):
-                        if 'udemy.com/course/' in a['href']:
-                            if matches_keywords(title):
-                                courses.append({'title': title, 'url': a['href']})
-                                print(f"   ✅ {title[:50]}")
-                            break
-                
-                time.sleep(0.5)
-            except:
-                continue
-                
+        for search_term in search_terms:
+            # Search page
+            url = f"https://www.udemy24.com/search?q={search_term}"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(r.text, 'html.parser')
+
+            # Find blog post links
+            post_links = []
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'udemy24.com/2' in href:  # Blog posts are dated like /2025/11/...
+                    if href not in post_links:
+                        post_links.append(href)
+
+            # Visit each post
+            for post_url in post_links[:50]:
+                try:
+                    pr = requests.get(post_url, headers=HEADERS, timeout=10)
+                    psoup = BeautifulSoup(pr.text, 'html.parser')
+
+                    # Get title
+                    title_elem = psoup.find('h1') or psoup.find('title')
+                    title = title_elem.text.strip() if title_elem else "Unknown"
+
+                    # Find Udemy link in post content
+                    content = psoup.find('div', class_='post-body') or psoup.find('article')
+                    if content:
+                        for a in content.find_all('a', href=True):
+                            if 'udemy.com/course/' in a['href']:
+                                if matches_keywords(title) and a['href'] not in [c['url'] for c in courses]:
+                                    courses.append({'title': title, 'url': a['href']})
+                                    print(f"   ✅ {title[:50]}")
+                                break
+
+                    time.sleep(0.3)
+                except:
+                    continue
+
+            time.sleep(1)
+
     except Exception as e:
         print(f"   ❌ Error: {e}")
-    
+
     return courses
 
 def scrape_discudemy():
     """Scrape Discudemy"""
     print("\n🔍 Scanning: Discudemy")
     courses = []
-    
+
     try:
         url = "https://www.discudemy.com/all"
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
-        
+
         # Find course cards
         for card in soup.find_all('div', class_='card'):
             try:
                 title_elem = card.find('h3') or card.find('a')
                 title = title_elem.text.strip() if title_elem else "Unknown"
-                
+
                 # Find the "Go to Course" button
                 for a in card.find_all('a', href=True):
                     href = a['href']
@@ -248,44 +257,44 @@ def scrape_discudemy():
                         try:
                             rr = requests.get(href, headers=HEADERS, timeout=10, allow_redirects=True)
                             if 'udemy.com/course/' in rr.url:
-                                if matches_keywords(title):
+                                if matches_keywords(title) and rr.url not in [c['url'] for c in courses]:
                                     courses.append({'title': title, 'url': rr.url})
                                     print(f"   ✅ {title[:50]}")
                                 break
                         except:
                             continue
-                
-                time.sleep(0.3)
+
+                time.sleep(0.2)
             except:
                 continue
-                
+
     except Exception as e:
         print(f"   ❌ Error: {e}")
-    
+
     return courses
 
 def scrape_realdiscount():
     """Scrape Real.Discount"""
     print("\n🔍 Scanning: Real.Discount")
     courses = []
-    
+
     try:
         url = "https://www.real.discount/udemy-coupon-code/"
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
-        
+
         # Find all Udemy links directly
         for a in soup.find_all('a', href=True):
             href = a['href']
             if 'udemy.com/course/' in href:
                 title = a.text.strip() or get_course_title_from_slug(extract_course_id(href) or "course")
-                if matches_keywords(title):
+                if matches_keywords(title) and href not in [c['url'] for c in courses]:
                     courses.append({'title': title, 'url': href})
                     print(f"   ✅ {title[:50]}")
-        
+
     except Exception as e:
         print(f"   ❌ Error: {e}")
-    
+
     return courses
 
 # ============= MEMORY =============
