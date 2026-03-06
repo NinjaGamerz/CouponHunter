@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """
-CouponHunter - MEGA VERSION v3.0
+CouponHunter - MEGA VERSION v3.1 FIXED
 Sources: 27 websites scraped for 100% OFF Udemy coupons
 Focus: Ethical Hacking | Bug Bounty | Cybersecurity | Coding | Networking | Pentesting
 Runs on: GitHub Actions
 Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+
+FIXES v3.1:
+- Telegram: switched to HTML mode with escaping (fixes Bad Request: can't parse entities)
+- clean_title: strips [] prefix, extra brackets, junk
+- Real.Discount: fixed to HTML scrape (API endpoint was returning empty)
+- TutorialBar: fixed to use category page + WP API fallback
+- DiscUdemy: fixed URL pattern + go-link follower
+- CouponScorpion: fixed to scan onclick/data-href/JS patterns for Udemy links
+- UdemyFreebies: fixed to find JS-embedded Udemy links
+- CourseVania: fixed URL detection pattern
 """
 import os
 import re
@@ -120,15 +130,49 @@ def extract_course_id(url):
     return match.group(1).lower() if match else None
 
 def extract_udemy_links(soup):
-    """Extract all Udemy course links from a BeautifulSoup object. Prefer couponCode links."""
+    """Extract Udemy course links from <a href>. Prefer couponCode links."""
     found = []
     for a in soup.find_all('a', href=True):
         href = a['href']
         if 'udemy.com/course/' in href:
             found.append(href)
-    # Prefer links with couponCode
     coupon_links = [u for u in found if 'couponCode=' in u]
     return coupon_links if coupon_links else found
+
+def extract_udemy_links_deep(soup):
+    """
+    Deep extraction: scans href, data-href, data-url, onclick, and raw HTML text
+    for Udemy course links. Use on sites that hide links in JS/attributes.
+    """
+    found = set()
+
+    # 1. Standard <a href>
+    for a in soup.find_all('a', href=True):
+        if 'udemy.com/course/' in a['href']:
+            found.add(a['href'])
+
+    # 2. data-href / data-url / data-link attributes on any tag
+    for tag in soup.find_all(True):
+        for attr in ['data-href', 'data-url', 'data-link', 'data-redirect', 'data-coupon-url']:
+            val = tag.get(attr, '')
+            if 'udemy.com/course/' in val:
+                found.add(val)
+        # onclick="window.location='...'" or onclick="window.open('...')"
+        onclick = tag.get('onclick', '')
+        if 'udemy.com/course/' in onclick:
+            urls = re.findall(r'https?://[^\s\'"]+udemy\.com/course/[^\s\'"]+', onclick)
+            found.update(urls)
+
+    # 3. Raw HTML text scan (catches JS variables, escaped links, etc.)
+    raw = str(soup)
+    urls = re.findall(r'https?://(?:www\.)?udemy\.com/course/[A-Za-z0-9_\-/?=&%+#.]+', raw)
+    found.update(urls)
+
+    # Sort: prefer couponCode links first
+    found = list(found)
+    coupon = [u for u in found if 'couponCode=' in u]
+    plain  = [u for u in found if 'couponCode=' not in u]
+    return coupon + plain
 
 def get_soup(url, timeout=15, retries=2):
     for attempt in range(retries):
@@ -141,9 +185,26 @@ def get_soup(url, timeout=15, retries=2):
     return None
 
 def clean_title(title):
-    for remove in ['[Free]', '[100% Off]', '100% OFF', 'Free Course', 'Udemy Coupon', '–', '|']:
+    # Remove known junk strings
+    for remove in [
+        '[Free]', '[free]', '[100% Off]', '[100% off]', '[100% OFF]',
+        '100% OFF', '100% Off', 'Free Course', 'Udemy Coupon', 'Udemy coupon',
+        '– Udemy', '| Udemy', '–', ' | ', ' - Udemy', 'Download Free',
+    ]:
         title = title.replace(remove, '')
+    # Strip leading [] prefix like "[] Course Title"
+    title = re.sub(r'^\s*\[.*?\]\s*', '', title)
+    # Collapse multiple spaces
+    title = re.sub(r'\s+', ' ', title)
     return title.strip()
+
+def escape_html(text):
+    """Escape special HTML chars for Telegram HTML parse mode."""
+    return (text
+            .replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;')
+            .replace('"', '&quot;'))
 
 # ============================================================
 # TELEGRAM
@@ -153,10 +214,12 @@ def send_telegram(title, url, source=""):
         print("⚠️  Telegram not configured")
         return False
     try:
+        safe_title  = escape_html(title)
+        safe_source = escape_html(source)
         msg = (
-            f"🔥 *FREE COURSE ALERT!*\n\n"
-            f"📚 *{title}*\n\n"
-            f"🌐 Source: `{source}`\n"
+            f"🔥 <b>FREE COURSE ALERT!</b>\n\n"
+            f"📚 <b>{safe_title}</b>\n\n"
+            f"🌐 Source: <code>{safe_source}</code>\n"
             f"🔗 {url}\n\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"
         )
@@ -165,7 +228,7 @@ def send_telegram(title, url, source=""):
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": msg,
-                "parse_mode": "Markdown",
+                "parse_mode": "HTML",
                 "disable_web_page_preview": False,
             },
             timeout=10
@@ -174,7 +237,19 @@ def send_telegram(title, url, source=""):
             print(f"   ✅ Sent: {title[:70]}")
             return True
         else:
-            print(f"   ❌ Telegram error {r.status_code}: {r.text[:100]}")
+            # Fallback: retry without parse_mode if HTML still fails
+            r2 = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": f"🔥 FREE COURSE!\n\n{title}\n\nSource: {source}\n{url}\n\n{datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
+                },
+                timeout=10
+            )
+            if r2.status_code == 200:
+                print(f"   ✅ Sent (plain): {title[:70]}")
+                return True
+            print(f"   ❌ Telegram error {r.status_code}: {r.text[:120]}")
             return False
     except Exception as e:
         print(f"   ❌ Telegram exception: {e}")
@@ -335,154 +410,251 @@ def scrape_category_listing(site_name, category_urls, max_pages=3, max_posts=40)
     return courses
 
 # ============================================================
-# SOURCE 1: TutorialBar (WordPress REST API — very active)
+# SOURCE 1: TutorialBar — fixed v3.1
 # ============================================================
 def scrape_tutorialbar():
     print("\n🔍 TutorialBar.com")
     courses = []
-    api = "https://tutorialbar.com/wp-json/wp/v2/posts"
+    found_urls = set()
 
-    for term in ["hacking", "security", "python", "linux", "bug bounty", "pentest"]:
-        try:
-            r = requests.get(api, headers=HEADERS, timeout=12,
-                             params={'per_page': 20, 'search': term})
-            if r.status_code != 200:
+    # Approach 1: WP REST API with embedded content
+    api = "https://tutorialbar.com/wp-json/wp/v2/posts"
+    for term in ["hacking", "security", "python", "linux", "bug bounty", "pentest", "kali", "cyber"]:
+        for page in [1, 2]:
+            try:
+                r = requests.get(api, headers=HEADERS, timeout=14,
+                                 params={'per_page': 20, 'search': term, 'page': page, '_embed': 1})
+                if r.status_code != 200:
+                    break
+                posts = r.json()
+                if not posts:
+                    break
+                for post in posts:
+                    link = post.get('link', '')
+                    if link and link not in found_urls:
+                        found_urls.add(link)
+                        title_raw = post.get('title', {}).get('rendered', '')
+                        title = clean_title(BeautifulSoup(title_raw, 'html.parser').text)
+                        # Try extracting from content directly (faster than fetching page)
+                        content_html = post.get('content', {}).get('rendered', '')
+                        if content_html:
+                            csoup = BeautifulSoup(content_html, 'html.parser')
+                            links = extract_udemy_links_deep(csoup)
+                            if links and is_relevant_course(title):
+                                courses.append({'title': title, 'url': links[0], 'source': 'TutorialBar'})
+                                print(f"   ✅ {title[:70]}")
+            except Exception as e:
+                print(f"   ⚠️  API term={term} page={page}: {e}")
+                break
+            time.sleep(0.3)
+
+    # Approach 2: Category page HTML scrape as fallback
+    if not courses:
+        cat_urls = [
+            "https://tutorialbar.com/cat/it-and-software/",
+            "https://tutorialbar.com/cat/development/",
+            "https://tutorialbar.com/cat/network-security/",
+        ]
+        for cat_url in cat_urls:
+            soup = get_soup(cat_url, timeout=12)
+            if not soup:
                 continue
-            for post in r.json():
-                title = clean_title(BeautifulSoup(
-                    post.get('title', {}).get('rendered', ''), 'html.parser').text)
-                content_html = post.get('content', {}).get('rendered', '')
-                csoup = BeautifulSoup(content_html, 'html.parser')
-                if not is_relevant_course(title):
-                    continue
-                links = extract_udemy_links(csoup)
-                if links:
-                    courses.append({'title': title, 'url': links[0], 'source': 'TutorialBar'})
-                    print(f"   ✅ {title[:70]}")
-        except Exception as e:
-            print(f"   ⚠️  {e}")
-        time.sleep(0.4)
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'tutorialbar.com' in href and '/20' in href and href not in found_urls:
+                    found_urls.add(href)
+            time.sleep(0.3)
+
+        for post_url in list(found_urls)[:40]:
+            soup = get_soup(post_url, timeout=10)
+            if not soup:
+                continue
+            t_elem = soup.find('h1')
+            title = clean_title(t_elem.text.strip()) if t_elem else ""
+            if not is_relevant_course(title):
+                continue
+            links = extract_udemy_links_deep(soup)
+            if links:
+                courses.append({'title': title, 'url': links[0], 'source': 'TutorialBar'})
+                print(f"   ✅ {title[:70]}")
+            time.sleep(0.3)
 
     print(f"   Total: {len(courses)}")
     return courses
 
 # ============================================================
-# SOURCE 2: DiscUdemy
+# SOURCE 2: DiscUdemy — fixed v3.1
 # ============================================================
 def scrape_discudemy():
     print("\n🔍 DiscUdemy.com")
     courses = []
-    cat_urls = [
+    post_urls = set()
+
+    # DiscUdemy listing pages — they use /all/ or /lang/english/ with numbered pages
+    listing_urls = [
+        "https://www.discudemy.com/lang/english",
         "https://www.discudemy.com/category/it-and-software",
         "https://www.discudemy.com/category/development",
-        "https://www.discudemy.com/lang/english",
     ]
 
-    for cat_url in cat_urls:
-        for page in range(1, 4):
-            url = cat_url if page == 1 else f"{cat_url}/{page}"
+    for base_url in listing_urls:
+        for page in range(1, 5):
+            url = base_url if page == 1 else f"{base_url}/{page}"
             soup = get_soup(url, timeout=12)
             if not soup:
                 break
 
-            cards = soup.find_all('div', class_=re.compile(r'card|course|post'))
-            for card in cards:
-                a = card.find('a', href=True)
-                if not a:
-                    continue
-                href = a['href']
-                if 'discudemy.com' not in href and not href.startswith('/'):
-                    continue
-
-                full_url = href if href.startswith('http') else f"https://www.discudemy.com{href}"
-                if any(x in full_url for x in ['/category', '/lang', '/page']):
-                    continue
-
-                title = a.text.strip() or clean_title(
-                    (card.find('h2') or card.find('h3') or card.find('p') or a
-                     ).text.strip())
-
-                if not is_relevant_course(title):
-                    continue
-
-                # Fetch the individual course page
-                psoup = get_soup(full_url, timeout=10)
-                if not psoup:
-                    continue
-
-                title_h1 = psoup.find('h1')
-                if title_h1:
-                    title = clean_title(title_h1.text.strip())
-
-                links = extract_udemy_links(psoup)
-                if not links:
-                    # DiscUdemy uses a /go/ redirect; find it and follow
-                    go_link = None
-                    for al in psoup.find_all('a', href=True):
-                        if '/go/' in al['href'] or 'discudemy.com/go' in al['href']:
-                            go_link = al['href']
-                            break
-                    if go_link:
-                        if go_link.startswith('/'):
-                            go_link = 'https://www.discudemy.com' + go_link
-                        try:
-                            gr = requests.get(go_link, headers=HEADERS, timeout=10,
-                                              allow_redirects=True)
-                            if 'udemy.com/course/' in gr.url:
-                                links = [gr.url]
-                        except Exception:
-                            pass
-
-                if links:
-                    courses.append({'title': title, 'url': links[0], 'source': 'DiscUdemy'})
-                    print(f"   ✅ {title[:70]}")
-
-                time.sleep(0.3)
+            # Course cards: <div class="card"> or <section class="card">
+            cards = soup.find_all(['div', 'section', 'article'],
+                                   class_=re.compile(r'card|course|post-item'))
+            if not cards:
+                # Fallback: find all internal links that look like course slugs
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('/') and len(href) > 3:
+                        skip = any(x in href for x in [
+                            '/category', '/lang', '/go/', '/about', '/contact',
+                            '/faq', '/privacy', '/terms', '/page', '#'
+                        ])
+                        if not skip:
+                            post_urls.add('https://www.discudemy.com' + href)
+                    elif 'discudemy.com' in href:
+                        skip = any(x in href for x in [
+                            '/category', '/lang', '/go/', '/about', '/contact',
+                            '/faq', '/privacy', '/terms', '/page', '#'
+                        ])
+                        if not skip:
+                            post_urls.add(href)
+            else:
+                for card in cards:
+                    a = card.find('a', href=True)
+                    if not a:
+                        continue
+                    href = a['href']
+                    if href.startswith('/'):
+                        href = 'https://www.discudemy.com' + href
+                    if 'discudemy.com' in href:
+                        skip = any(x in href for x in ['/category', '/lang', '/go/'])
+                        if not skip:
+                            post_urls.add(href)
             time.sleep(0.4)
+
+    print(f"   Found {len(post_urls)} course pages")
+
+    for post_url in list(post_urls)[:60]:
+        soup = get_soup(post_url, timeout=10)
+        if not soup:
+            continue
+
+        t_elem = soup.find('h1')
+        title = clean_title(t_elem.text.strip()) if t_elem else ""
+        if not is_relevant_course(title):
+            time.sleep(0.2)
+            continue
+
+        # Try direct Udemy links first
+        links = extract_udemy_links_deep(soup)
+
+        # DiscUdemy uses /go/<slug> redirect buttons
+        if not links:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if '/go/' in href:
+                    if href.startswith('/'):
+                        href = 'https://www.discudemy.com' + href
+                    try:
+                        gr = requests.get(href, headers=HEADERS, timeout=12,
+                                          allow_redirects=True)
+                        if 'udemy.com/course/' in gr.url:
+                            links = [gr.url]
+                            break
+                        # Sometimes the final page has the Udemy link embedded
+                        gsoup = BeautifulSoup(gr.text, 'html.parser')
+                        glinks = extract_udemy_links_deep(gsoup)
+                        if glinks:
+                            links = glinks
+                            break
+                    except Exception:
+                        pass
+
+        if links:
+            courses.append({'title': title, 'url': links[0], 'source': 'DiscUdemy'})
+            print(f"   ✅ {title[:70]}")
+
+        time.sleep(0.35)
 
     print(f"   Total: {len(courses)}")
     return courses
 
 # ============================================================
-# SOURCE 3: Real.Discount (has public API!)
+# SOURCE 3: Real.Discount — fixed v3.1
 # ============================================================
 def scrape_realdiscount():
     print("\n🔍 Real.Discount")
     courses = []
+    found_urls = set()
 
-    for term in ["hacking", "security", "python", "linux", "pentest", "cyber", "coding"]:
-        try:
-            api_url = (
-                "https://www.real.discount/api-web/all-courses/"
-                f"?store=Udemy&page=1&per_page=30&orderby=date&free=1&search={quote_plus(term)}"
-            )
-            r = requests.get(api_url, headers=HEADERS, timeout=12)
-            if r.status_code == 200:
-                data = r.json()
-                items = data if isinstance(data, list) else data.get('results', data.get('courses', []))
-                for item in items:
-                    title = item.get('name', item.get('title', ''))
-                    url   = item.get('url', item.get('link', ''))
-                    if not url or 'udemy.com' not in url:
-                        continue
+    # Approach 1: Their search page with free filter
+    for term in ["hacking", "security", "python", "linux", "pentest", "cyber", "kali"]:
+        for url in [
+            f"https://www.real.discount/?search={quote_plus(term)}&free=1",
+            f"https://www.real.discount/search/?q={quote_plus(term)}&free=true",
+            f"https://www.real.discount/?s={quote_plus(term)}",
+        ]:
+            soup = get_soup(url, timeout=12)
+            if not soup:
+                continue
+
+            # Direct Udemy links on listing page
+            links = extract_udemy_links_deep(soup)
+            for lnk in links:
+                cid = extract_course_id(lnk)
+                if cid and cid not in found_urls:
+                    found_urls.add(cid)
+                    title = extract_course_id(lnk).replace('-', ' ').title() if cid else "Unknown"
+                    # Try to get proper title from nearby text
+                    for a in soup.find_all('a', href=True):
+                        if lnk in a.get('href', ''):
+                            t = a.text.strip()
+                            if t and len(t) > 5:
+                                title = clean_title(t)
+                            break
                     if is_relevant_course(title):
-                        courses.append({'title': clean_title(title), 'url': url, 'source': 'RealDiscount'})
+                        courses.append({'title': title, 'url': lnk, 'source': 'RealDiscount'})
                         print(f"   ✅ {title[:70]}")
-        except Exception as e:
-            print(f"   ⚠️  {e}")
+
+            # Also collect internal post links to visit
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'real.discount' in href and '/udemy/' in href:
+                    if href not in found_urls:
+                        found_urls.add(href)
+            time.sleep(0.3)
         time.sleep(0.3)
 
-    # Fallback HTML scrape
-    soup = get_soup("https://www.real.discount/udemy-coupon-code/", timeout=12)
-    if soup:
+    # Approach 2: Category pages
+    for cat_url in [
+        "https://www.real.discount/udemy-coupon-code/it-and-software/",
+        "https://www.real.discount/udemy-coupon-code/development/",
+        "https://www.real.discount/udemy-coupon-code/",
+    ]:
+        soup = get_soup(cat_url, timeout=12)
+        if not soup:
+            continue
         for a in soup.find_all('a', href=True):
-            if 'udemy.com/course/' in a['href']:
+            href = a['href']
+            if 'udemy.com/course/' in href:
                 title = a.text.strip()
                 if not title:
-                    cid = extract_course_id(a['href'])
+                    cid = extract_course_id(href)
                     title = cid.replace('-', ' ').title() if cid else "Unknown"
                 if is_relevant_course(title):
-                    courses.append({'title': title, 'url': a['href'], 'source': 'RealDiscount'})
+                    cid = extract_course_id(href)
+                    if cid and cid not in found_urls:
+                        found_urls.add(cid)
+                        courses.append({'title': clean_title(title), 'url': href, 'source': 'RealDiscount'})
+                        print(f"   ✅ {title[:70]}")
+        time.sleep(0.4)
 
     print(f"   Total: {len(courses)}")
     return courses
@@ -592,45 +764,62 @@ def scrape_courson():
     return courses
 
 # ============================================================
-# SOURCE 6: CouponScorpion (existing, improved)
+# SOURCE 6: CouponScorpion — fixed v3.1
 # ============================================================
 def scrape_couponscorpion():
     print("\n🔍 CouponScorpion.com")
     courses = []
+    post_links = set()
+
+    # Try multiple category URL patterns
     cat_urls = [
         "https://couponscorpion.com/category/100-off-coupons/it-software/",
+        "https://couponscorpion.com/it-software/",
         "https://couponscorpion.com/category/100-off-coupons/development/",
+        "https://couponscorpion.com/development/",
         "https://couponscorpion.com/category/100-off-coupons/",
+        "https://couponscorpion.com/",
     ]
 
-    post_links = set()
-    for cat_url in cat_urls:
+    for cat_url in cat_urls[:4]:
         for page in range(1, 4):
             url = cat_url if page == 1 else f"{cat_url}page/{page}/"
             soup = get_soup(url, timeout=12)
             if not soup:
                 break
+            found_on_page = 0
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if 'couponscorpion.com' in href:
-                    skip = any(x in href for x in ['/category/', '/page/', '/tag/', '/author/', '#'])
-                    if not skip and len(href) > 35:
+                    skip = any(x in href for x in [
+                        '/category/', '/page/', '/tag/', '/author/', '#', '/wp-', '?', '/about', '/contact'
+                    ])
+                    if not skip and len(href) > 30 and href not in post_links:
                         post_links.add(href)
+                        found_on_page += 1
+            if found_on_page == 0:
+                break
             time.sleep(0.3)
 
     print(f"   Found {len(post_links)} posts")
-    for post_url in list(post_links)[:50]:
+
+    for post_url in list(post_links)[:60]:
         soup = get_soup(post_url, timeout=10)
         if not soup:
             continue
-        title_elem = soup.find('h1')
-        title = clean_title(title_elem.text.strip()) if title_elem else ""
+
+        t_elem = soup.find('h1')
+        title = clean_title(t_elem.text.strip()) if t_elem else ""
+        title = title.replace('[100% Off]', '').replace('[Free]', '').strip()
         if not is_relevant_course(title):
             continue
-        links = extract_udemy_links(soup)
+
+        # Deep extraction — CouponScorpion may use JS redirect buttons
+        links = extract_udemy_links_deep(soup)
         if links:
             courses.append({'title': title, 'url': links[0], 'source': 'CouponScorpion'})
             print(f"   ✅ {title[:70]}")
+
         time.sleep(0.4)
 
     print(f"   Total: {len(courses)}")
@@ -670,57 +859,97 @@ def scrape_idownloadcoupon():
     return courses
 
 # ============================================================
-# SOURCE 8: UdemyFreebies
+# SOURCE 8: UdemyFreebies — fixed v3.1
 # ============================================================
 def scrape_udemyfreebies():
     print("\n🔍 UdemyFreebies.com")
     courses = []
-    urls = [
+    post_links = set()
+
+    # Category pages — limit to relevant ones
+    cat_urls = [
         "https://udemyfreebies.com/free-udemy-courses/it-software",
         "https://udemyfreebies.com/free-udemy-courses/development",
         "https://udemyfreebies.com/free-udemy-courses/network-security",
     ]
 
-    post_links = set()
-    for url in urls:
-        soup = get_soup(url, timeout=12)
-        if not soup:
-            continue
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if 'udemyfreebies.com' in href:
-                skip = any(x in href for x in ['/free-udemy-courses/', '/page/', '#', '/category/'])
-                if not skip and len(href) > 30:
-                    post_links.add(href)
-        time.sleep(0.3)
+    for cat_url in cat_urls:
+        for page in range(1, 4):
+            url = cat_url if page == 1 else f"{cat_url}/page/{page}"
+            soup = get_soup(url, timeout=12)
+            if not soup:
+                break
+            found_on_page = 0
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'udemyfreebies.com' in href:
+                    skip = any(x in href for x in [
+                        '/free-udemy-courses/', '/page/', '#', '/category/', '/about',
+                        '/contact', '/privacy', '/terms', '?', '/author/'
+                    ])
+                    if not skip and len(href) > 35 and href not in post_links:
+                        post_links.add(href)
+                        found_on_page += 1
+            if found_on_page == 0:
+                break
+            time.sleep(0.3)
 
-    print(f"   Found {len(post_links)} posts")
-    for post_url in list(post_links)[:50]:
+    # Limit to 60 posts max to avoid GitHub Actions timeout
+    print(f"   Found {len(post_links)} posts (checking up to 60)")
+    checked = 0
+    for post_url in list(post_links)[:60]:
+        checked += 1
+        if checked % 10 == 0:
+            print(f"   Checked {checked}/60...")
+
         soup = get_soup(post_url, timeout=10)
         if not soup:
             continue
-        title_elem = soup.find('h1')
-        title = clean_title(title_elem.text.strip()) if title_elem else ""
+
+        t_elem = soup.find('h1')
+        title = clean_title(t_elem.text.strip()) if t_elem else ""
         if not is_relevant_course(title):
+            time.sleep(0.15)
             continue
 
-        # UdemyFreebies uses a "Get Free Coupon" button that links to Udemy
-        links = extract_udemy_links(soup)
-        # Also check for redirect links
+        # Deep extraction first
+        links = extract_udemy_links_deep(soup)
+
+        # UdemyFreebies "Get Coupon" button often redirects to Udemy
         if not links:
             for a in soup.find_all('a', href=True):
-                if '/coupon/' in a['href'] or 'get-coupon' in a['href'].lower():
+                href = a['href']
+                btn_text = a.text.strip().lower()
+                if any(x in href for x in ['/coupon/', '/get-coupon', '/go/', '/visit/']):
+                    if href.startswith('/'):
+                        href = 'https://udemyfreebies.com' + href
                     try:
-                        r = requests.get(a['href'], headers=HEADERS, timeout=10, allow_redirects=True)
-                        if 'udemy.com/course/' in r.url:
-                            links = [r.url]
+                        gr = requests.get(href, headers=HEADERS, timeout=10, allow_redirects=True)
+                        if 'udemy.com/course/' in gr.url:
+                            links = [gr.url]
+                            break
+                        # Check the redirect page for embedded Udemy link
+                        gsoup = BeautifulSoup(gr.text, 'html.parser')
+                        glinks = extract_udemy_links_deep(gsoup)
+                        if glinks:
+                            links = glinks
                             break
                     except Exception:
                         pass
+                elif 'coupon' in btn_text or 'enroll' in btn_text or 'free' in btn_text:
+                    if 'udemyfreebies.com' in href:
+                        try:
+                            gr = requests.get(href, headers=HEADERS, timeout=10, allow_redirects=True)
+                            if 'udemy.com/course/' in gr.url:
+                                links = [gr.url]
+                                break
+                        except Exception:
+                            pass
 
         if links:
             courses.append({'title': title, 'url': links[0], 'source': 'UdemyFreebies'})
             print(f"   ✅ {title[:70]}")
+
         time.sleep(0.3)
 
     print(f"   Total: {len(courses)}")
@@ -729,42 +958,59 @@ def scrape_udemyfreebies():
 # ============================================================
 # SOURCE 9: CourseVania
 # ============================================================
+# SOURCE 9: CourseVania — fixed v3.1
+# ============================================================
 def scrape_coursevania():
     print("\n🔍 CourseVania.com")
     courses = []
-    urls = [
+    post_links = set()
+
+    seed_urls = [
         "https://coursevania.com/courses/it-software/",
         "https://coursevania.com/courses/development/",
         "https://coursevania.com/courses/network-security/",
+        "https://coursevania.com/it-software/",
+        "https://coursevania.com/development/",
+        "https://coursevania.com/",
     ]
 
-    post_links = set()
-    for url in urls:
+    for base_url in seed_urls[:4]:
         for page in range(1, 4):
-            page_url = url if page == 1 else f"{url}page/{page}/"
-            soup = get_soup(page_url, timeout=12)
+            url = base_url if page == 1 else f"{base_url}page/{page}/"
+            soup = get_soup(url, timeout=12)
             if not soup:
                 break
+            found_on_page = 0
             for a in soup.find_all('a', href=True):
                 href = a['href']
-                if 'coursevania.com/courses/' in href:
-                    # Individual course page
-                    path = href.replace('https://coursevania.com/courses/', '')
-                    if path and '/' not in path.rstrip('/') and not any(
-                            x in href for x in ['/it-software/', '/development/', '/network-security/', '/page/']):
+                if 'coursevania.com' not in href and not href.startswith('/'):
+                    continue
+                if href.startswith('/'):
+                    href = 'https://coursevania.com' + href
+                skip = any(x in href for x in [
+                    '/courses/it-software', '/courses/development', '/courses/network',
+                    '/it-software/', '/development/', '/network-security/',
+                    '/page/', '/category/', '/tag/', '/author/', '#',
+                    '/about', '/contact', '/privacy', '/terms',
+                ])
+                if not skip and 'coursevania.com' in href and len(href) > 30:
+                    if href not in post_links:
                         post_links.add(href)
+                        found_on_page += 1
+            if found_on_page == 0:
+                break
             time.sleep(0.3)
 
     print(f"   Found {len(post_links)} posts")
-    for post_url in list(post_links)[:50]:
+    for post_url in list(post_links)[:60]:
         soup = get_soup(post_url, timeout=10)
         if not soup:
             continue
-        title_elem = soup.find('h1') or soup.find('h2')
-        title = clean_title(title_elem.text.strip()) if title_elem else ""
+        t_elem = soup.find('h1') or soup.find('h2')
+        title = clean_title(t_elem.text.strip()) if t_elem else ""
         if not is_relevant_course(title):
             continue
-        links = extract_udemy_links(soup)
+        links = extract_udemy_links_deep(soup)
         if links:
             courses.append({'title': title, 'url': links[0], 'source': 'CourseVania'})
             print(f"   ✅ {title[:70]}")
@@ -1182,7 +1428,7 @@ SCRAPERS = [
 
 def main():
     print("=" * 80)
-    print("🚀 CouponHunter MEGA v3.0 — 27 Sources")
+    print("🚀 CouponHunter MEGA v3.1 FIXED — 27 Sources")
     print("   Focus: Hacking | Bug Bounty | Cybersecurity | Coding | Networking")
     print(f"   Started: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 80)

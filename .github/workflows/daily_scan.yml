@@ -2,7 +2,7 @@ name: CouponHunter Scan
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # Every 15 minutes
+    - cron: "*/59 * * * *"  # Every 60 minutes
   workflow_dispatch:
 
 jobs:
